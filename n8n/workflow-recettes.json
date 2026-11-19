@@ -1,0 +1,752 @@
+{
+  "name": "Recettes Instagram → Supabase",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "init"
+        ]
+      },
+      "id": "8a567529-c9ca-4c15-82f5-07e098a681c1",
+      "name": "Démarrage de n8n",
+      "type": "n8n-nodes-base.n8nTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "469882bb-2c41-4c94-b56c-d5769aed4f51",
+      "name": "Toutes les 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/claim_import_jobs",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"p_limit\": 3}"
+      },
+      "id": "bcdd2c34-5c84-4b89-9050-2c9d99fbc450",
+      "name": "Réserver les imports",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aplatit la réponse Supabase et revalide l'URL (sécurité : elle part dans une commande shell)\nconst IG = /^https:\\/\\/www\\.instagram\\.com\\/(reel|p|tv)\\/[A-Za-z0-9_-]+\\/$/;\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  const rows = Array.isArray(j) ? j : Array.isArray(j?.data) ? j.data : [j];\n  for (const r of rows) {\n    if (!r || !r.id || !IG.test(r.url || '')) continue;\n    out.push({ json: { id: r.id, household_id: r.household_id, chat_id: r.chat_id, url: r.url, attempts: r.attempts } });\n  }\n}\nreturn out;"
+      },
+      "id": "90094df9-8428-4b88-8c8f-4ae5af4500db",
+      "name": "Liste des imports",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ `mkdir -p /files/tmp; find /files/tmp -type f -mmin +120 -delete 2>/dev/null; COOK=''; if [ -s /files/cookies.txt ]; then COOK='--cookies /files/cookies.txt'; fi; yt-dlp $COOK --no-playlist --no-progress --no-warnings -f 'ba/b' -x --audio-format mp3 --audio-quality 6 -o '/files/tmp/${$json.id}.%(ext)s' --no-simulate -O '%(.{id,title,description,uploader,thumbnail,duration})j' '${$json.url}'` }}"
+      },
+      "id": "bd5eed9b-9817-4422-93e4-ab55ca6c99a7",
+      "name": "Télécharger (yt-dlp)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        920,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "={{ '/files/tmp/' + $('Liste des imports').item.json.id + '.mp3' }}",
+        "options": {
+          "dataPropertyName": "data"
+        }
+      },
+      "id": "ea1a6bd1-661e-4281-9bd5-08738bc24981",
+      "name": "Lire l'audio",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "model",
+              "value": "={{ $env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe' }}"
+            },
+            {
+              "name": "response_format",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "943df2bd-a7d6-4691-a656-d1da441f3feb",
+      "name": "Transcrire (OpenAI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rassemble légende + transcription et prépare l'appel de mise en forme\nconst job = $('Liste des imports').item.json;\nconst dl = $('Télécharger (yt-dlp)').item.json;\nlet meta = {};\nconst lines = String(dl.stdout || '').split('\\n').map(l => l.trim()).filter(l => l.startsWith('{'));\nif (lines.length) { try { meta = JSON.parse(lines[lines.length - 1]); } catch (e) {} }\n\nconst transcript = typeof $json.text === 'string' ? $json.text.trim() : '';\nconst caption = String(meta.description || '').trim();\nif (!transcript && !caption) {\n  throw new Error('NOT_RECIPE: ni description ni son exploitable dans cette vidéo');\n}\n\nconst SYSTEM = \"Tu es un chef et assistant culinaire. On te donne la description (légende) et la transcription audio d'une vidéo Instagram. Tu en extrais UNE recette complète, structurée, en français.\\n\\nRègles :\\n- Si la source est dans une autre langue, traduis tout en français.\\n- N'invente pas d'ingrédient absent de la source. Si une quantité n'est pas donnée, quantity = null.\\n- Quantités en nombres décimaux (0.5 et pas \\\"1/2\\\"). Convertis les unités US (cup, oz, lb, tbsp, tsp) en métrique (g, ml, cas, cac).\\n- unit : \\\"piece\\\" pour ce qui se compte (2 œufs → quantity 2, unit \\\"piece\\\"), \\\"\\\" si aucune unité n'a de sens (ex : \\\"sel\\\" sans quantité).\\n- name : nom court tel qu'on l'achète, sans quantité, en minuscules (ex : \\\"oignon jaune\\\", \\\"crème fraîche épaisse\\\"). Les précisions de préparation vont dans note (ex : \\\"émincé\\\", \\\"à température ambiante\\\").\\n- section : rayon de supermarché le plus logique pour l'ingrédient.\\n- steps : étapes claires, à l'impératif, dans l'ordre, sans numérotation. Intègre les températures et durées de cuisson.\\n- Si non précisés, estime de façon réaliste : servings (2 par défaut), prep_minutes, cook_minutes (null si aucune cuisson), difficulty.\\n- diets : uniquement les régimes réellement compatibles avec TOUS les ingrédients (ex : \\\"vegetarien\\\" seulement s'il n'y a ni viande ni poisson).\\n- title : nom de plat appétissant et précis, sans emoji. description : 1 à 2 phrases donnant envie.\\n- tips : astuces ou variantes mentionnées dans la source, sinon \\\"\\\".\\n- Si le contenu n'est clairement pas une recette de cuisine, is_recipe = false (remplis le reste au minimum).\";\nconst SCHEMA = {\"type\": \"object\", \"additionalProperties\": false, \"required\": [\"is_recipe\", \"title\", \"description\", \"category\", \"difficulty\", \"servings\", \"prep_minutes\", \"cook_minutes\", \"diets\", \"ingredients\", \"steps\", \"tips\"], \"properties\": {\"is_recipe\": {\"type\": \"boolean\"}, \"title\": {\"type\": \"string\"}, \"description\": {\"type\": \"string\"}, \"category\": {\"type\": \"string\", \"enum\": [\"entree\", \"plat\", \"dessert\", \"petit_dejeuner\", \"aperitif\", \"accompagnement\", \"sauce\", \"boisson\", \"autre\"]}, \"difficulty\": {\"type\": \"string\", \"enum\": [\"facile\", \"moyen\", \"difficile\"]}, \"servings\": {\"type\": \"integer\"}, \"prep_minutes\": {\"type\": [\"integer\", \"null\"]}, \"cook_minutes\": {\"type\": [\"integer\", \"null\"]}, \"diets\": {\"type\": \"array\", \"items\": {\"type\": \"string\", \"enum\": [\"vegetarien\", \"vegan\", \"pescetarien\", \"sans_gluten\", \"sans_lactose\", \"leger\", \"proteine\"]}}, \"ingredients\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"additionalProperties\": false, \"required\": [\"name\", \"quantity\", \"unit\", \"section\", \"note\"], \"properties\": {\"name\": {\"type\": \"string\"}, \"quantity\": {\"type\": [\"number\", \"null\"]}, \"unit\": {\"type\": \"string\", \"enum\": [\"\", \"g\", \"kg\", \"ml\", \"cl\", \"l\", \"cac\", \"cas\", \"piece\", \"pincee\", \"gousse\", \"tranche\", \"botte\", \"sachet\", \"boite\", \"tasse\"]}, \"section\": {\"type\": \"string\", \"enum\": [\"fruits_legumes\", \"boucherie\", \"poissonnerie\", \"cremerie\", \"charcuterie_traiteur\", \"boulangerie\", \"feculents\", \"conserves\", \"condiments\", \"epices\", \"epicerie_sucree\", \"petit_dejeuner\", \"biscuits_aperitif\", \"surgeles\", \"boissons\", \"monde\", \"autre\"]}, \"note\": {\"type\": \"string\"}}}}, \"steps\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"tips\": {\"type\": \"string\"}}};\nconst user = [\n  'Auteur : ' + (meta.uploader || 'inconnu'),\n  'Titre : ' + (meta.title || ''),\n  '',\n  '=== DESCRIPTION ===',\n  caption.slice(0, 8000) || '(vide)',\n  '',\n  '=== TRANSCRIPTION AUDIO ===',\n  transcript.slice(0, 12000) || '(vide)',\n].join('\\n');\n\nreturn {\n  json: {\n    meta: { uploader: meta.uploader || null, thumbnail: meta.thumbnail || '', title: meta.title || '' },\n    caption,\n    transcript,\n    gpt: {\n      messages: [ { role: 'system', content: SYSTEM }, { role: 'user', content: user } ],\n      response_format: { type: 'json_schema', json_schema: { name: 'recette', strict: true, schema: SCHEMA } },\n    },\n  },\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "9dd51333-f70f-4e20-ba50-760e7d93e061",
+      "name": "Préparer le prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        200
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "options": {
+          "timeout": 120000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.assign({ model: $env.OPENAI_TEXT_MODEL || 'gpt-4.1-mini' }, $json.gpt)) }}"
+      },
+      "id": "f9eaa232-053f-404d-8ef3-ed69c292d2d8",
+      "name": "Mettre en forme (OpenAI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1880,
+        200
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Transforme la réponse GPT en ligne de la table \"recipes\"\nconst job = $('Liste des imports').item.json;\nconst prep = $('Préparer le prompt').item.json;\nconst msg = $json.choices?.[0]?.message;\nif (!msg || !msg.content) throw new Error('Réponse OpenAI vide : ' + JSON.stringify(msg || $json).slice(0, 300));\nconst r = JSON.parse(msg.content);\nif (!r.is_recipe) throw new Error('NOT_RECIPE: la vidéo ne contient pas de recette exploitable');\n\nconst int = (v) => (Number.isFinite(v) && v >= 0 ? Math.round(v) : null);\nconst recipe = {\n  id: job.id,                       // id de l'import = id de la recette (idempotent)\n  household_id: job.household_id,\n  title: String(r.title || 'Recette sans titre').slice(0, 200),\n  description: r.description || '',\n  category: r.category || 'plat',\n  difficulty: r.difficulty || null,\n  servings: Math.min(50, Math.max(1, int(r.servings) || 2)),\n  prep_minutes: int(r.prep_minutes),\n  cook_minutes: int(r.cook_minutes),\n  diets: Array.isArray(r.diets) ? r.diets : [],\n  ingredients: (r.ingredients || []).filter(i => i && i.name).map(i => ({\n    name: String(i.name).trim(), quantity: Number.isFinite(i.quantity) ? i.quantity : null,\n    unit: i.unit || '', section: i.section || 'autre', note: i.note || '',\n  })),\n  steps: (r.steps || []).map(s => String(s).trim()).filter(Boolean),\n  tips: r.tips || '',\n  source_url: job.url,\n  source_author: prep.meta.uploader,\n  source_caption: prep.caption,\n  source_transcript: prep.transcript,\n};\nreturn { json: { recipe, thumbnail: prep.meta.thumbnail || '', image_path: job.household_id + '/' + job.id + '-ig.jpg' } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "e44a1c39-145a-4515-8b27-6e4237bb7624",
+      "name": "Construire la recette",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2120,
+        200
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.thumbnail }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "18e54e9f-4401-4254-b913-8b1d3421254c",
+      "name": "Télécharger la miniature",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2360,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/storage/v1/object/recipe-images/{{ $('Construire la recette').item.json.image_path }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "x-upsert",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "id": "b0592d5e-5bef-4502-a299-8227b9ff9bf1",
+      "name": "Envoyer l'image (Storage)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ajoute le chemin de l'image seulement si l'upload a réussi\nconst b = $('Construire la recette').item.json;\nconst uploaded = !$json.error && ($json.Key || $json.Id || $json.key || $json.id);\nreturn { json: { ...b.recipe, image_path: uploaded ? b.image_path : null } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "528dc9dd-57bc-41fe-8830-2225c227d3c3",
+      "name": "Finaliser",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/recipes?on_conflict=id",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "d48d2e0a-1cbf-4f52-b4ef-25c54ab9db28",
+      "name": "Enregistrer la recette",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3080,
+        200
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/import_queue?id=eq.{{ $('Liste des imports').item.json.id }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: 'done', recipe_id: $('Liste des imports').item.json.id, error: null }) }}"
+      },
+      "id": "10b87081-212f-4001-b733-482881bdbf44",
+      "name": "Marquer comme importé",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3320,
+        200
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Liste des imports').item.json.chat_id, text: '✅ Recette ajoutée : ' + $('Finaliser').item.json.title }) }}"
+      },
+      "id": "3e5b8ca1-bd24-4980-bcea-9cf08117270b",
+      "name": "Telegram ✅",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3560,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "command": "={{ 'rm -f /files/tmp/' + $('Liste des imports').item.json.id + '.*' }}"
+      },
+      "id": "09c48c9e-71a2-44e3-9e70-d11dd8d0b4e3",
+      "name": "Supprimer l'audio",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        3800,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Récupère l'import concerné et le message d'erreur\nlet job = null;\ntry { job = $('Liste des imports').item.json; } catch (e) {}\nconst raw = $json.error;\nconst msg = typeof raw === 'string' ? raw\n  : (raw && (raw.message || raw.description)) || $json.message || JSON.stringify($json).slice(0, 500);\nreturn { json: { p_id: job ? job.id : null, p_error: String(msg).slice(0, 1000), p_final: /NOT_RECIPE/.test(String(msg)) } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "a1f85e86-4711-4b93-b745-0d4981734625",
+      "name": "Infos erreur",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2120,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/fail_import_job",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "97406cd9-663a-4d8f-98dd-9c5aa0e87b61",
+      "name": "Remettre en file / échec",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2360,
+        600
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// On ne prévient sur Telegram qu'après le dernier essai\nreturn $input.all().filter(i => i.json && i.json.status === 'error' && i.json.chat_id);"
+      },
+      "id": "c1b4a59d-8cf2-4bd0-b61b-c24eca45a959",
+      "name": "Échec définitif ?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, text: '❌ Import impossible : ' + $json.url + '\\nRaison : ' + $json.error + '\\n(Relance possible depuis l\\'app : Réglages → Imports)' }) }}"
+      },
+      "id": "bc66486e-dcfb-40ab-aa6b-09e06c6bb140",
+      "name": "Telegram ❌",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2840,
+        600
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "## 🍳 Import des recettes Instagram\n1. Réserve jusqu'à 3 liens en attente dans Supabase\n2. yt-dlp récupère la légende + l'audio\n3. OpenAI transcrit puis structure la recette (JSON)\n4. Miniature → Storage, recette → table `recipes`\n5. Notification Telegram\n\nEn cas d'erreur : 3 essais automatiques, puis statut `error` + message Telegram.\nClés : fichier `.env` (variables `$env.*`).",
+        "height": 260,
+        "width": 420
+      },
+      "id": "50c470d9-76e3-4e86-bc57-63d30aa442d4",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        160,
+        -160
+      ]
+    }
+  ],
+  "connections": {
+    "Démarrage de n8n": {
+      "main": [
+        [
+          {
+            "node": "Réserver les imports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Toutes les 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Réserver les imports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réserver les imports": {
+      "main": [
+        [
+          {
+            "node": "Liste des imports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Liste des imports": {
+      "main": [
+        [
+          {
+            "node": "Télécharger (yt-dlp)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Télécharger (yt-dlp)": {
+      "main": [
+        [
+          {
+            "node": "Lire l'audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Infos erreur",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire l'audio": {
+      "main": [
+        [
+          {
+            "node": "Transcrire (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcrire (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Préparer le prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer le prompt": {
+      "main": [
+        [
+          {
+            "node": "Mettre en forme (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Infos erreur",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mettre en forme (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Construire la recette",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Infos erreur",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construire la recette": {
+      "main": [
+        [
+          {
+            "node": "Télécharger la miniature",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Infos erreur",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Télécharger la miniature": {
+      "main": [
+        [
+          {
+            "node": "Envoyer l'image (Storage)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer l'image (Storage)": {
+      "main": [
+        [
+          {
+            "node": "Finaliser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finaliser": {
+      "main": [
+        [
+          {
+            "node": "Enregistrer la recette",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enregistrer la recette": {
+      "main": [
+        [
+          {
+            "node": "Marquer comme importé",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Infos erreur",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marquer comme importé": {
+      "main": [
+        [
+          {
+            "node": "Telegram ✅",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram ✅": {
+      "main": [
+        [
+          {
+            "node": "Supprimer l'audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Infos erreur": {
+      "main": [
+        [
+          {
+            "node": "Remettre en file / échec",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remettre en file / échec": {
+      "main": [
+        [
+          {
+            "node": "Échec définitif ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Échec définitif ?": {
+      "main": [
+        [
+          {
+            "node": "Telegram ❌",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Europe/Paris"
+  },
+  "pinData": {}
+}
