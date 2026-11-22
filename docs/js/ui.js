@@ -132,7 +132,7 @@ export const LABELS = {
   family: {
     salades: 'Salades', soupes: 'Soupes & bouillons', pates_riz: 'Pâtes, gnocchis & riz', mijotes: 'Plats en sauce & mijotés',
     currys: 'Currys', gratins_rotis: 'Gratins & rôtis', tartinades: 'Tartinades & planches', pains_pates: 'Pains & pâtes',
-    gateaux_tartes: 'Gâteaux & tartes', patisseries: 'Pâtisseries',
+    gateaux_tartes: 'Gâteaux & tartes', patisseries: 'Pâtisseries', accompagnements: 'Accompagnements',
   },
 };
 
