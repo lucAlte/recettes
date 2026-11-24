@@ -1,0 +1,17 @@
+Photos du site vitrine — à déposer dans ce dossier (docs/assets/landing/)
+Format JPG, idéalement moins de 300 Ko chacune (compresse avec squoosh.app).
+Tant qu'une photo manque, un joli dégradé avec un emoji s'affiche à sa place.
+
+hero-1.jpg   portrait 4:5 (ex. 1000×1250)  — en-tête, carte de gauche
+hero-2.jpg   portrait 4:5                  — en-tête, carte du milieu (la plus visible)
+hero-3.jpg   portrait 4:5                  — en-tête, carte de droite
+plat-1.jpg   carré 1:1 (ex. 1000×1000)     — galerie « Pasta alle vongole »
+plat-2.jpg   carré 1:1                     — galerie « Curry du mardi soir »
+plat-3.jpg   carré 1:1                     — galerie « Salade d'été »
+plat-4.jpg   carré 1:1                     — galerie « Le gâteau du dimanche »
+plat-5.jpg   carré 1:1                     — galerie « Crudo pour l'apéro »
+plat-6.jpg   carré 1:1                     — galerie « Brunch à rallonge »
+courses.jpg  paysage 4:3 (ex. 1400×1050)   — section « Liste de courses »
+partage.jpg  paysage 4:3                   — section « En famille »
+
+Les légendes de la galerie se changent dans docs/js/views/landing.js (tableau GALLERY).
